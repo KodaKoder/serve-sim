@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unl
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
 import { join, resolve } from "path";
-import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
+import { STATE_DIR, stateFileForDevice, listStateFiles, inProcessServeSimState, writeServeSimState, authenticatedWsUrl, type ServeSimDeviceState } from "./state";
+import { hostsForBindAddress } from "./request-guard";
 import { textToKeyEvents, UnsupportedCharacterError, sendKeyEventsToWs } from "./text-to-keys";
 import { dirnameOf, sleepSync, isPortFree, servePreview } from "./runtime";
 import { killPortHolder } from "./ports";
@@ -709,7 +710,7 @@ async function gesture(jsonStr: string, deviceArg?: string) {
   }
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(authenticatedWsUrl(state));
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
@@ -743,7 +744,7 @@ async function tap(xArg: string, yArg: string, deviceArg?: string) {
     process.exit(1);
   }
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(authenticatedWsUrl(state));
     ws.binaryType = "arraybuffer";
     const send = (type: "begin" | "end") => {
       const json = new TextEncoder().encode(JSON.stringify({ type, x, y }));
@@ -817,7 +818,7 @@ async function typeText(
     process.exit(1);
   }
 
-  await sendKeyEventsToWs(state.wsUrl, events);
+  await sendKeyEventsToWs(authenticatedWsUrl(state), events);
 }
 
 function openHidSocket(wsUrl: string): Promise<WebSocket> {
@@ -826,7 +827,7 @@ function openHidSocket(wsUrl: string): Promise<WebSocket> {
     ws.binaryType = "arraybuffer";
     ws.onopen = () => resolve(ws);
     ws.onerror = () => {
-      console.error("Failed to connect to serve-sim server at", wsUrl);
+      console.error("Failed to connect to serve-sim server at", wsUrl.split("?")[0]);
       reject(new Error("WebSocket connection failed"));
     };
   });
@@ -847,7 +848,7 @@ async function fold(hinge: number, deviceArg?: string) {
     process.exit(1);
   }
 
-  const ws = await openHidSocket(state.wsUrl);
+  const ws = await openHidSocket(authenticatedWsUrl(state));
   const FOLD_TAG = 0x0e;
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -892,7 +893,7 @@ async function rotate(orientation: string, deviceArg?: string) {
     process.exit(1);
   }
 
-  const ws = await openHidSocket(state.wsUrl);
+  const ws = await openHidSocket(authenticatedWsUrl(state));
   sendHid(ws, 0x07, { orientation });
   setTimeout(() => { ws.close(); }, 50);
 }
@@ -921,7 +922,7 @@ async function button(buttonName = "home", deviceArg?: string) {
   const payload = hid ? { button: buttonName, ...hid } : { button: buttonName };
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(state.wsUrl);
+    const ws = new WebSocket(authenticatedWsUrl(state));
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
@@ -970,7 +971,7 @@ async function caDebug(option: string, stateRaw: string, deviceArg?: string) {
   }
 
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(stateFile.wsUrl);
+    const ws = new WebSocket(authenticatedWsUrl(stateFile));
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       const json = new TextEncoder().encode(JSON.stringify({ option: resolved, enabled }));
@@ -995,7 +996,7 @@ async function memoryWarning(deviceArg?: string) {
     process.exit(1);
   }
   return new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(stateFile.wsUrl);
+    const ws = new WebSocket(authenticatedWsUrl(stateFile));
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       ws.send(new Uint8Array([0x09]));
@@ -1613,6 +1614,7 @@ async function serve(
   initialState: PreviewInitialState | undefined,
   theme: SimulatorTheme | undefined,
   exitOnSimulatorShutdown = false,
+  security: { allowedHosts: string[]; unsafeExec: boolean } = { allowedHosts: [], unsafeExec: false },
 ) {
   // Boot the target simulators; the preview server streams them in-process
   // (no spawned helper). Sessions are created lazily on the first stream request.
@@ -1627,14 +1629,17 @@ async function serve(
   const targetDevice = targetDevices[0];
 
   const { simMiddleware } = await import("./middleware");
-  // Standalone serve-sim owns its HTTP server and wires WebSocket upgrades, so
-  // it can route helper/DevTools sockets through the single preview port.
+  // Loopback names are always accepted. An explicit non-loopback --host also
+  // admits the addresses that bind is reachable at; anything else (a tunnel
+  // or proxy hostname) must be named with --allowed-host.
+  const isLoopbackBind = host === "127.0.0.1" || host === "localhost" || host === "::1";
   const middleware = simMiddleware({
     basePath: "/",
     device: targetDevice,
     codec,
     initialState,
-    proxyHelpers: true,
+    allowedHosts: [...(isLoopbackBind ? [] : hostsForBindAddress(host)), ...security.allowedHosts],
+    unsafeExec: security.unsafeExec,
   });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.
@@ -1737,9 +1742,21 @@ program
   .option(
     "--host <addr>",
     "Interface to bind the preview server to. Use 0.0.0.0 to expose on the " +
-      "LAN — only on trusted networks: the preview exposes a token-gated " +
-      "shell-exec route.",
+      "LAN — only on trusted networks: anyone who can reach the port can load " +
+      "the preview and control the simulator.",
     "127.0.0.1",
+  )
+  .option(
+    "--allowed-host <host>",
+    "Extra Host header to accept (repeatable), e.g. a tunnel or reverse-proxy " +
+      "hostname. Requests for any other non-loopback host are refused.",
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[],
+  )
+  .option(
+    "--unsafe-exec",
+    "Let the preview page run arbitrary shell commands on this machine. Off by " +
+      "default: the page may only run the commands its own tools need.",
   )
   .option("--detach", "Spawn helper and exit (daemon mode)")
   .option(
@@ -1831,6 +1848,7 @@ Examples:
         initialState,
         opts.theme,
         !!opts.exitOnSimulatorShutdown,
+        { allowedHosts: opts.allowedHost ?? [], unsafeExec: !!opts.unsafeExec },
       );
     }
   });

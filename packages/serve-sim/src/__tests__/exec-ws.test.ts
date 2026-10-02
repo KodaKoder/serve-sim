@@ -17,7 +17,7 @@ const TOKEN = "exec-ws-test-token";
 let server: PreviewServer;
 
 beforeAll(async () => {
-  const middleware = simMiddleware({ basePath: "/", execToken: TOKEN, device: "DEVICE-A" });
+  const middleware = simMiddleware({ basePath: "/", execToken: TOKEN, device: "DEVICE-A", unsafeExec: true });
   server = await servePreview({ port: PORT, middleware, host: "127.0.0.1" });
 });
 

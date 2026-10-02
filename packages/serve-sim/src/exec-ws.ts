@@ -1,15 +1,14 @@
-import { exec, type ExecException } from "child_process";
-import { createHash, timingSafeEqual } from "crypto";
 import { request as httpRequest, type IncomingMessage } from "http";
 import type { Socket } from "net";
 import type { Duplex } from "stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import { tokensMatch } from "./request-guard";
 
 // WebSocket control channel for the preview page. Browsers cap HTTP/1.1 at
 // six connections per origin, and every preview tab used to hold several
 // long-lived requests (MJPEG + 3-4 SSE channels + pooled exec fetches) — with
 // two or more tabs open, new requests queue behind them forever. This channel
-// carries shell execs, simulator-settings requests, and multiplexed SSE
+// carries host commands, simulator-settings requests, and multiplexed SSE
 // subscriptions, so each tab needs just one pooled connection (the video
 // stream) plus this socket.
 //
@@ -23,7 +22,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 // Wire protocol (all JSON text frames):
 //   client → {token}                  first frame; must match the exec token
 //   server → {ready:true}             auth accepted
-//   client → {id, command}            run a shell command
+//   client → {id, command}            run an allowlisted host command
 //   server → {id, stdout, stderr, exitCode}
 //   client → {id, ui:{…}}             simulator-settings request (in-process,
 //   server → {id, …} | {id, error}     no shell round-trip)
@@ -34,13 +33,6 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 const AUTH_TIMEOUT_MS = 10_000;
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
-
-function tokensMatch(a: string, b: string): boolean {
-  // Hash both sides so the comparison is constant-time even when lengths differ.
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
 
 interface ExecMessage {
   token?: string;
@@ -66,7 +58,9 @@ interface ExecChannelOptions {
   ssePrefixes?: string[];
   /** In-process handler for `{id, ui}` simulator-settings requests. */
   onUiRequest?: UiRequestHandler;
-  /** Optional observer for completed shell commands. */
+  /** Runs a host command; the caller decides what is allowed (see host-commands.ts). */
+  runCommand: (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  /** Optional observer for completed host commands. */
   onCommandResult?: CommandResultHandler;
 }
 
@@ -171,13 +165,8 @@ function wireExecSocket(
       return;
     }
     const { id, command } = msg;
-    exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const result = {
-        id,
-        stdout: stdout.toString(),
-        stderr: stderr.toString(),
-        exitCode: err ? ((err as ExecException).code ?? 1) : 0,
-      };
+    void opts.runCommand(command).then((outcome) => {
+      const result = { id, ...outcome };
       try {
         opts.onCommandResult?.(command, result);
       } catch {
@@ -209,20 +198,7 @@ export function createExecUpgradeHandler(opts: ExecChannelOptions) {
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
     if (url !== opts.path && url !== `${opts.path}/`) return false;
 
-    // Same-origin policy mirrors POST /exec: browsers always send Origin on
-    // WebSocket upgrades, and a cross-origin page's Origin won't match Host.
-    const origin = req.headers.origin;
-    if (origin) {
-      try {
-        if (new URL(origin).host !== req.headers.host) {
-          socket.destroy();
-          return true;
-        }
-      } catch {
-        socket.destroy();
-        return true;
-      }
-    }
+    // Host and Origin were already checked by the middleware's upgrade guard.
 
     // Port for SSE loopback requests: prefer the socket's own local port,
     // fall back to the Host header (Bun's upgrade socket may not expose it).

@@ -386,6 +386,18 @@ export function eventLogEventForCommand(
     }
   }
 
+  if (tokens[0] === "serve-sim:screenshot" && tokens[1]) {
+    return {
+      device: tokens[1],
+      source: "exec",
+      kind: "screenshot",
+      action: "capture",
+      status,
+      summary: "Screenshot",
+      details: commandDetail,
+    };
+  }
+
   const serveSim = serveSimCommand(tokens);
   if (serveSim) {
     const { verb, args } = serveSim;

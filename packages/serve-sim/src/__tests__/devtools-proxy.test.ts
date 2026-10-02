@@ -96,25 +96,27 @@ describe("devtools proxy", () => {
       port: previewPort,
       middleware: simMiddleware({
         basePath: "/",
-        proxyHelpers: true,
+        execToken: "devtools-test-token",
         inspectWebKitBridge: async () => bridge,
       }),
       host: "127.0.0.1",
     });
 
-    const response = await fetch(`http://127.0.0.1:${previewPort}/devtools?device=${encodeURIComponent(udid)}`);
+    const devtoolsUrl = `http://127.0.0.1:${previewPort}/devtools?device=${encodeURIComponent(udid)}`;
+    expect((await fetch(devtoolsUrl)).status).toBe(401);
+    const response = await fetch(devtoolsUrl, { headers: { Authorization: "Bearer devtools-test-token" } });
     expect(response.ok).toBe(true);
     const json = await response.json();
     const target = json.targets[0];
     const encodedTargetId = encodeURIComponent(targetId);
-    expect(target.webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${previewPort}/devtools/page/${encodedTargetId}`);
+    expect(target.webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${previewPort}/devtools/page/${encodedTargetId}?token=devtools-test-token`);
     const frontendUrl = new URL(target.devtoolsFrontendUrl, `http://127.0.0.1:${previewPort}`);
     expect(frontendUrl.pathname).toBe("/devtools-frontend/inspector.html");
-    expect(frontendUrl.searchParams.get("ws")).toBe(`127.0.0.1:${previewPort}/devtools/page/${encodedTargetId}`);
+    expect(frontendUrl.searchParams.get("ws")).toBe(`127.0.0.1:${previewPort}/devtools/page/${encodedTargetId}?token=devtools-test-token`);
     expect(frontendUrl.searchParams.has("wss")).toBe(false);
 
     const echoed = await new Promise<string>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${previewPort}/devtools/page/${encodedTargetId}`);
+      const ws = new WebSocket(target.webSocketDebuggerUrl);
       const timer = setTimeout(() => {
         ws.close();
         reject(new Error("timed out waiting for CDP echo"));

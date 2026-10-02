@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { authenticatedWsUrl, stateFileForDevice } from "../state";
 
 /**
  * Regression test for the in-process HID path (napi migration, #108).
@@ -81,7 +82,9 @@ describeIfSim(`serve-sim malformed HID input (booted sim ${bootedUdid ?? "<skipp
       );
     }
     const state = JSON.parse(detach.stdout.trim()) as { wsUrl: string; streamUrl: string };
-    wsUrl = state.wsUrl;
+    // The input socket requires the session token of the server that owns it.
+    const { pid } = JSON.parse(readFileSync(stateFileForDevice(bootedUdid!), "utf-8")) as { pid: number };
+    wsUrl = authenticatedWsUrl({ pid, wsUrl: state.wsUrl });
     configUrl = state.streamUrl.replace("stream.mjpeg", "config");
 
     // `--detach` returns once the child is spawned, but on a cold CI runner the

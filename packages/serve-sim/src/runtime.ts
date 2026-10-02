@@ -37,6 +37,7 @@ type ConnectMiddleware = (
 
 type PreviewMiddleware = ConnectMiddleware & {
   handleUpgrade?: (req: IncomingMessage, socket: Socket, head: Buffer) => void;
+  allowPort?: (port: number) => void;
 };
 
 function parseHttpRequestHead(buffer: Buffer): {
@@ -147,6 +148,10 @@ export async function servePreview(opts: {
   host?: string;
 }): Promise<PreviewServer> {
   const isBun = !!process.versions.bun
+
+  // Under Bun, HTTP requests reach the middleware through an internal server
+  // on another port, so tell its Host allowlist which port is the public one.
+  opts.middleware.allowPort?.(opts.port);
 
   const internalServer = createHttpServer(
     {

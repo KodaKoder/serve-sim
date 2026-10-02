@@ -5,7 +5,9 @@ import { simMiddleware } from "../middleware";
 
 async function withServer<T>(fn: (origin: string) => Promise<T>): Promise<T> {
   const TOKEN = "test-token-abc123";
-  const handler = simMiddleware({ basePath: "/", execToken: TOKEN });
+  // `unsafeExec` so the suite can use `echo`; the default allowlist is covered
+  // by host-commands.test.ts and web-origin-guard.test.ts.
+  const handler = simMiddleware({ basePath: "/", execToken: TOKEN, unsafeExec: true });
   const server = createServer((req, res) => {
     handler(req, res, async () => {
       if (!res.headersSent) res.statusCode = 404;

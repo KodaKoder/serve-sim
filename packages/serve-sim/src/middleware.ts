@@ -1,9 +1,9 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
-import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
+import { execSync, spawn, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { Socket } from "net";
 // `ws` (kept external in the build) supplies a WebSocket *client* for the
@@ -21,7 +21,7 @@ import {
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
-import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
+import { inProcessServeSimState, writeServeSimState, writeSessionToken, type ServeSimDeviceState } from "./state";
 import { classifyStaleState, persistRecoveredState, resolveLiveHelperState } from "./helper-lifecycle";
 import { debugMw } from "./debug";
 import {
@@ -35,6 +35,9 @@ import { createExecUpgradeHandler, type UiRequestHandler } from "./exec-ws";
 import { UI_OPTIONS, getUiStatus, normalizeUiValue, setUiOption } from "./ui-settings";
 import type { PreviewInitialState } from "./preview-initial-state";
 import { simctlBootStatusArguments } from "./simctl";
+import { startLoopbackCdpServer } from "./cdp-bridge";
+import { runHostCommand } from "./host-commands";
+import { createRequestGuard, hasBearerToken, hasQueryToken } from "./request-guard";
 
 type SimReq = IncomingMessage;
 type SimRes = ServerResponse;
@@ -42,6 +45,11 @@ type SimNext = (err?: unknown) => Promise<void>;
 export type SimMiddleware = {
   (req: SimReq, res: SimRes, next?: SimNext): Promise<void>;
   handleUpgrade(req: SimReq, socket: Socket, head: Buffer): void;
+  /**
+   * Accept `port` in loopback `Host` headers. Only needed when the public port
+   * differs from the one the request socket is bound to (a front proxy).
+   */
+  allowPort(port: number): void;
 };
 
 // Injected at build time as a base64-encoded string via `define`
@@ -398,43 +406,19 @@ function endpoint(base: string, path: string, device: string): string {
 /**
  * Rewrite the helper URLs in a state for the requesting browser.
  *
- * When `proxy` is set (standalone `serve-sim`, which owns its server and wires
- * WebSocket upgrades), the URLs point at the preview's same-origin `/helper`
- * proxy so remote viewers only need the one preview port. When it's off — the
- * default for embedded `app.use(simMiddleware(...))` mounts, where the host's
- * server doesn't forward `upgrade` events to `handleUpgrade` — the helper's
- * loopback URLs are emitted directly (with `127.0.0.1` swapped for the request
- * hostname so LAN/tunnel viewers can still reach the separate helper port).
+ * The URLs always point at this server's own same-origin `/helper` routes,
+ * which serve the device from an in-process session. Nothing is handed out
+ * that would make the page talk to another origin: the stream endpoints send
+ * no CORS headers and the input socket refuses foreign origins.
  */
 export function rewriteStateForRequestHost(
   state: ServeSimState,
   hostHeader: string | undefined,
   base = "",
   protocol: "http" | "https" = "http",
-  proxy = false,
 ): ServeSimState {
   if (!hostHeader) {
     return state;
-  }
-  if (!proxy) {
-    let hostname: string;
-    try {
-      hostname = new URL(`http://${hostHeader}`).hostname;
-    } catch {
-      return state;
-    }
-    // `URL.hostname` keeps brackets around IPv6 literals, so the IPv6 loopback
-    // comparison is against the bracketed form rather than `::1`.
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") {
-      return state;
-    }
-    const rewrite = (s: string) => s.replace("127.0.0.1", hostname);
-    return {
-      ...state,
-      url: rewrite(state.url),
-      streamUrl: rewrite(state.streamUrl),
-      wsUrl: rewrite(state.wsUrl),
-    };
   }
   const normalizedBase = base === "/" ? "" : base.replace(/\/+$/, "");
   const helperBase = `${normalizedBase}/helper`;
@@ -466,6 +450,8 @@ function devtoolsProxyTarget(rawUrl: string, prefix: string): { upstreamPath: st
     return null;
   }
   const suffix = parsed.pathname.slice(prefix.length);
+  // The session token authenticates the browser to us; the bridge never sees it.
+  parsed.searchParams.delete("token");
   return { upstreamPath: `/devtools${suffix}${parsed.search}` };
 }
 
@@ -494,6 +480,7 @@ function helperProxyTarget(rawUrl: string, prefix: string): { device: string | n
   }
   const suffix = upstreamSegments.length > 0 ? `/${upstreamSegments.join("/")}` : "/";
   parsed.searchParams.delete("device");
+  parsed.searchParams.delete("token");
   return { device, upstreamPath: `${suffix}${parsed.search}` };
 }
 
@@ -852,7 +839,8 @@ export function previewConfigForState(
   state: ServeSimState,
   base: string,
   serveSimBin: string,
-  execToken: string,
+  /** Session token. Pass it only when building the config injected into the page. */
+  execToken: string | undefined,
   codec?: string,
   proxyHelpers = false,
   initialState?: PreviewInitialState,
@@ -870,7 +858,7 @@ export function previewConfigForState(
   gridShutdownEndpoint: string;
   gridMemoryEndpoint: string;
   previewEndpoint: string;
-  execToken: string;
+  execToken?: string;
   codec?: string;
   initialState?: PreviewInitialState;
   proxyHelpers?: boolean;
@@ -891,7 +879,7 @@ export function previewConfigForState(
     gridShutdownEndpoint: gridApiBase + "/shutdown",
     gridMemoryEndpoint: gridApiBase + "/memory",
     previewEndpoint: base === "" ? "/" : base,
-    execToken,
+    ...(execToken ? { execToken } : {}),
     ...(codec ? { codec } : {}),
     ...(initialState ? { initialState } : {}),
     ...(proxyHelpers ? { proxyHelpers: true } : {}),
@@ -957,7 +945,6 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
     }
   }
   inspectWebKitBridge = (async () => {
-    const { startCdpServer } = await import("inspect-webkit");
     for (let port = INSPECT_WEBKIT_START_PORT; port < INSPECT_WEBKIT_START_PORT + 50; port++) {
       if (!(await isLocalPortFree(port))) {
         const existing = await existingInspectWebKitBridge(port);
@@ -965,10 +952,9 @@ async function ensureInspectWebKitBridge(): Promise<WebKitBridge> {
         continue;
       }
       try {
-        // Bind explicitly to IPv4 127.0.0.1 so the preview's DevTools
-        // websocket proxy has a stable loopback upstream. `localhost` resolves
-        // to ::1 first on some setups, which would leave the bridge unreachable.
-        const server = await startCdpServer({ host: "127.0.0.1", port }) as Awaited<ReturnType<typeof startCdpServer>> & {
+        // IPv4 loopback only: a stable upstream for the preview's DevTools
+        // websocket proxy, and never reachable from another machine.
+        const server = await startLoopbackCdpServer(port) as Awaited<ReturnType<typeof startLoopbackCdpServer>> & {
           highlightTarget?(targetId: string, on: boolean): Promise<void>;
           releaseHighlight?(targetId?: string): void;
         };
@@ -1036,9 +1022,13 @@ function devtoolsFrontendUrl(
   wsParamName: "ws" | "wss",
   wsTargetBase: string,
   targetId: string,
+  token: string,
 ): string {
   const url = new URL(`${frontendBase}/inspector.html`, "http://serve-sim.local");
-  url.searchParams.set(wsParamName, `${wsTargetBase}/page/${encodeURIComponent(targetId)}`);
+  url.searchParams.set(
+    wsParamName,
+    `${wsTargetBase}/page/${encodeURIComponent(targetId)}?token=${encodeURIComponent(token)}`,
+  );
   return `${url.pathname}${url.search}`;
 }
 
@@ -1220,12 +1210,29 @@ export interface SimMiddlewareOptions {
   /** Pin this preview server to a specific simulator UDID. */
   device?: string;
   /**
-   * Per-session bearer token gating the `/exec` shell-exec route.
-   * Auto-generated if omitted. The token is injected into the preview HTML
-   * so the in-page UI can call `/exec` same-origin; LAN attackers and
-   * cross-origin pages cannot read it.
+   * Per-session token gating every route that changes state: host commands,
+   * simulator input, device start/shutdown and DevTools. Auto-generated if
+   * omitted. It is delivered only inside the preview HTML, which other
+   * origins cannot read (the `Host` allowlist stops DNS rebinding). It is not
+   * a defence against clients that can load the page itself: when the server
+   * is bound to a non-loopback address, anyone who can reach the port can
+   * fetch the page and the token with it.
    */
   execToken?: string;
+  /**
+   * Extra `Host` header values to accept besides `localhost`, `127.0.0.1` and
+   * `[::1]`. Requests naming any other host get a 403. List the names the
+   * preview is reached under when it is exposed beyond loopback (LAN address,
+   * tunnel, reverse proxy); `"name"` matches any port, `"name:port"` one port.
+   */
+  allowedHosts?: string[];
+  /**
+   * Let the page run arbitrary shell commands on the host. Off by default:
+   * the page is limited to the commands the bundled UI issues (see
+   * `host-commands.ts`). Enable only for a trusted, loopback-only setup whose
+   * own tooling depends on a free-form exec.
+   */
+  unsafeExec?: boolean;
   /**
    * Pin the preview stream codec. `"mjpeg"` forces the software JPEG path for
    * hosts whose hardware can't encode H.264 (e.g. VMs without the high/low-
@@ -1236,25 +1243,16 @@ export interface SimMiddlewareOptions {
   /** UI choices applied when a preview page initially loads. */
   initialState?: PreviewInitialState;
   /**
-   * Route the browser's helper stream/control and DevTools sockets through the
-   * preview's same-origin `/helper` and `/devtools` proxies instead of the
-   * helper's own loopback port — so a single exposed preview port is enough for
-   * remote viewers. Requires the mounting server to forward WebSocket `upgrade`
-   * events to {@link SimMiddleware.handleUpgrade}. Standalone `serve-sim`
-   * enables this; plain `app.use(simMiddleware(...))` mounts leave it off (and
-   * keep direct helper URLs) unless they also wire upgrades. See the README's
-   * "Embed in your dev server" section.
+   * @deprecated No longer has any effect. The page always reaches the stream,
+   * input and DevTools sockets through this middleware's same-origin `/helper`
+   * and `/devtools` routes; cross-origin helper URLs are gone. Input and
+   * DevTools need the mounting server to forward WebSocket `upgrade` events to
+   * {@link SimMiddleware.handleUpgrade}. See the README's "Embed in your dev
+   * server" section.
    */
   proxyHelpers?: boolean;
   /** Test hook for supplying a fake inspect-webkit bridge. */
   inspectWebKitBridge?: () => Promise<WebKitBridge>;
-}
-
-function safeEqualString(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
 }
 
 function isJsonContentType(value: string | undefined): boolean {
@@ -1276,12 +1274,41 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
   const helperPrefix = helperProxyPrefix(base);
   const devtoolsPrefix = devtoolsProxyPrefix(base);
-  const proxyHelpers = options?.proxyHelpers ?? false;
+  // Helper and DevTools URLs are always same-origin; the flag only tells the
+  // page to re-anchor them to its own location.
+  const proxyHelpers = true;
   const getInspectWebKitBridge = options?.inspectWebKitBridge ?? ensureInspectWebKitBridge;
-  // Per-process random token. Anyone who can read the preview HTML same-origin
-  // can call /exec; cross-origin pages and LAN clients cannot, because they
-  // can't read this value (it's only injected into the preview page's config).
+  // Per-process random token, delivered only inside the preview HTML. Other
+  // origins cannot read that page (the Host allowlist below stops DNS
+  // rebinding), so they cannot present the token. Clients that can load the
+  // page — e.g. LAN hosts when bound to 0.0.0.0 — do get it.
   const execToken = options?.execToken ?? randomBytes(32).toString("base64url");
+  // Local CLI commands (`serve-sim tap`, …) authenticate with the same token,
+  // read from a file only this user can open.
+  writeSessionToken(execToken);
+  const guard = createRequestGuard({ allowedHosts: options?.allowedHosts });
+  const ownsUrl = (url: string) => base === "" || url === base || url.startsWith(`${base}/`);
+  const hostCommandContext = () => ({
+    serveSimBin: serveSimBinPath(),
+    allowArbitrary: options?.unsafeExec === true,
+  });
+  const pageOnlyConfig = { execToken };
+  const deny = (res: SimRes, status: number, error: string) => {
+    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ ok: false, error }));
+  };
+  /** Gate for routes that change state: same-origin, JSON body, session token. */
+  const authorizeMutation = (req: SimReq, res: SimRes): boolean => {
+    if (!isJsonContentType(req.headers["content-type"])) {
+      deny(res, 415, "Unsupported Media Type");
+      return false;
+    }
+    if (!hasBearerToken(req, execToken)) {
+      deny(res, 401, "Unauthorized");
+      return false;
+    }
+    return true;
+  };
 
   // Simulator-settings requests run in-process (just the underlying simctl /
   // ax-tool spawn) instead of round-tripping a full `node <cli>` exec per
@@ -1321,6 +1348,18 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const requestedDevice = queryDevice(rawUrl);
     const selectedDevice = requestedDevice ?? options?.device ?? null;
     const devtoolsFrontendBase = base === "/" ? "/devtools-frontend" : `${base}/devtools-frontend`;
+
+    // Requests outside our mount point belong to the embedding server.
+    if (!ownsUrl(url)) {
+      if (next) return next();
+      return;
+    }
+    // Every route below sits behind the Host allowlist and the Origin check.
+    const refusal = guard.check(req);
+    if (refusal) {
+      deny(res, 403, refusal);
+      return;
+    }
 
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     if (helperTarget) {
@@ -1377,7 +1416,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // minimal config with just the basePath + token.
         const minimal = JSON.stringify({
           basePath: base,
-          execToken,
+          ...pageOnlyConfig,
           ...(options?.initialState ? { initialState: options.initialState } : {}),
         });
         html = html.replace(
@@ -1387,16 +1426,19 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       }
 
       if (state) {
-        const remoteState = rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers);
-        const config = JSON.stringify(previewConfigForState(
-          remoteState,
-          base,
-          serveSimBinPath(),
-          execToken,
-          options?.codec,
-          proxyHelpers,
-          options?.initialState,
-        ));
+        const remoteState = rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req));
+        const config = JSON.stringify({
+          ...previewConfigForState(
+            remoteState,
+            base,
+            serveSimBinPath(),
+            undefined,
+            options?.codec,
+            proxyHelpers,
+            options?.initialState,
+          ),
+          ...pageOnlyConfig,
+        });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
       }
@@ -1482,7 +1524,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       const page = limit == null ? sims : sims.slice(offset, offset + limit);
       const devices = page.map((d) => {
         const helper = helperByUdid.get(d.udid);
-        const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
+        const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req)) : null;
         const displays = resolveDeviceDisplays(d);
         return {
           device: d.udid,
@@ -1517,6 +1559,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // pidfile stays until that process is actually gone so `--kill` can
     // still find it.
     if (url === base + "/grid/api/shutdown" && req.method === "POST") {
+      if (!authorizeMutation(req, res)) return;
       let body = "";
       req.on("data", (chunk: Buffer | string) => {
         body += typeof chunk === "string" ? chunk : chunk.toString();
@@ -1555,6 +1598,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // Start streaming a device in-process (auto-boots if needed). The preview
     // server serves its /helper routes directly — no spawned helper.
     if (url === base + "/grid/api/start" && req.method === "POST") {
+      if (!authorizeMutation(req, res)) return;
       let body = "";
       req.on("data", (chunk: Buffer | string) => {
         body += typeof chunk === "string" ? chunk : chunk.toString();
@@ -1587,6 +1631,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // /devtools/page/:id on localhost; the preview adds iframe-safe frontend
     // URLs so the browser UI can embed Chrome DevTools.
     if (url === base + "/devtools") {
+      // Listing targets starts the CDP bridge, so it needs the session token.
+      if (!hasBearerToken(req, execToken)) {
+        deny(res, 401, "Unauthorized");
+        return;
+      }
       const states = await readServeSimStates();
       const state = selectServeSimState(states, selectedDevice);
       if (!state) {
@@ -1597,21 +1646,20 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       try {
         const bridge = await getInspectWebKitBridge();
         const bridgeTargets = await bridge.listTargets();
-        // Proxy mode routes the inspector socket through the preview's
-        // same-origin `/devtools` proxy; otherwise the browser talks to the
-        // bridge's loopback port directly (the pre-proxy behavior).
-        const wsProtocol = proxyHelpers ? websocketProtocolForRequest(req) : "ws";
-        const wsTargetBase = proxyHelpers
-          ? `${hostForRequest(req) ?? `127.0.0.1:${bridge.port}`}${devtoolsPrefix}`
-          : `127.0.0.1:${bridge.port}/devtools`;
+        // The inspector socket always goes through the preview's same-origin
+        // `/devtools` proxy; the bridge's own port is never handed to the page.
+        const wsProtocol = websocketProtocolForRequest(req);
+        const wsTargetBase = `${hostForRequest(req) ?? `127.0.0.1:${req.socket.localPort}`}${devtoolsPrefix}`;
         // inspect-webkit@0.0.3 only exposes `sim:<webinspectord-pid>` for
         // simulator targets, which can't be reconciled against a sim UDID.
         // Surface every booted sim's targets (Safari Develop-menu behavior)
         // until inspect-webkit grows a real UDID we can filter on.
         const targets = bridgeTargets.map((target) => ({
           ...target,
-          webSocketDebuggerUrl: `${wsProtocol}://${wsTargetBase}/page/${encodeURIComponent(target.id)}`,
-          devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsProtocol, wsTargetBase, target.id),
+          // The proxy socket requires the session token; this response is
+          // itself token-gated, so embedding it here does not widen access.
+          webSocketDebuggerUrl: `${wsProtocol}://${wsTargetBase}/page/${encodeURIComponent(target.id)}?token=${encodeURIComponent(execToken)}`,
+          devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsProtocol, wsTargetBase, target.id, execToken),
         }));
         res.writeHead(200, {
           "Content-Type": "application/json",
@@ -1634,6 +1682,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // sit on a WIR slot when the picker is dismissed (or the tab is closed).
     // Optional body { targetId } releases just one; empty body releases all.
     if (url === base + "/devtools/release" && req.method === "POST") {
+      if (!authorizeMutation(req, res)) return;
       let body = "";
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
@@ -1657,6 +1706,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     // simulator the way Safari's Develop menu hover does. Body shape:
     // { targetId: string, on: boolean }.
     if (url === base + "/devtools/highlight" && req.method === "POST") {
+      if (!authorizeMutation(req, res)) return;
       let body = "";
       req.on("data", (chunk: Buffer) => (body += chunk));
       req.on("end", async () => {
@@ -1709,12 +1759,14 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       });
-      const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
+      const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req)) : null;
+      // The session token is never returned here: it travels only inside the
+      // preview HTML.
       res.end(JSON.stringify(remoteState ? previewConfigForState(
         remoteState,
         base,
         serveSimBinPath(),
-        execToken,
+        undefined,
         options?.codec,
         proxyHelpers,
         options?.initialState,
@@ -1780,13 +1832,13 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       const computeConfig = async (): Promise<string> => {
         const states = await readServeSimStates();
         const state = selectServeSimState(states, selectedDevice);
-        const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
+        const remoteState = state ? rewriteStateForRequestHost(state, hostForRequest(req), base, httpProtocolForRequest(req)) : null;
         return JSON.stringify(
           remoteState ? previewConfigForState(
             remoteState,
             base,
             serveSimBinPath(),
-            execToken,
+            undefined,
             options?.codec,
             proxyHelpers,
             options?.initialState,
@@ -1889,43 +1941,17 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
-    // POST /exec — run a shell command on the host. Gated by a per-process
-    // bearer token injected only into the same-origin preview HTML, with
-    // Content-Type + Origin checks to block CORS-simple CSRF (a malicious
-    // page POSTing `text/plain` JSON to a dev server bound to a public iface)
-    // and LAN attackers who can reach the port but can't read the token.
+    // POST /exec — run one of the host commands the preview UI is allowed to
+    // issue (see host-commands.ts). Same gate as every other mutation: Host
+    // allowlist + Origin check (above), JSON Content-Type to kill the
+    // CORS-simple form-POST path, and the session token.
     if ((url === base + "/exec" || url === base + "/exec/") && req.method === "POST") {
-      // 1. Reject anything that isn't a JSON request, killing the
-      //    `enctype="text/plain"` CORS-simple form-POST path.
       if (!isJsonContentType(req.headers["content-type"])) {
         res.writeHead(415, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ stdout: "", stderr: "Unsupported Media Type", exitCode: 1 }));
         return;
       }
-      // 2. If the browser supplied an Origin, require it match this server.
-      //    Same-origin XHR from the preview page sets Origin to our own URL;
-      //    a cross-origin page's Origin won't match.
-      const origin = req.headers.origin;
-      if (origin) {
-        try {
-          const originHost = new URL(origin).host;
-          if (originHost !== req.headers.host) {
-            res.writeHead(403, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ stdout: "", stderr: "Cross-origin request blocked", exitCode: 1 }));
-            return;
-          }
-        } catch {
-          res.writeHead(403, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ stdout: "", stderr: "Invalid Origin", exitCode: 1 }));
-          return;
-        }
-      }
-      // 3. Require the per-session bearer token. Cross-origin pages cannot
-      //    read it from window.__SIM_PREVIEW__; non-browser callers must
-      //    have copied it from the CLI output.
-      const authHeader = req.headers.authorization ?? "";
-      const match = /^Bearer\s+(.+)$/i.exec(authHeader);
-      if (!match || !safeEqualString(match[1]!.trim(), execToken)) {
+      if (!hasBearerToken(req, execToken)) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ stdout: "", stderr: "Unauthorized", exitCode: 1 }));
         return;
@@ -1953,15 +1979,10 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           res.end(JSON.stringify({ stdout: "", stderr: "Missing command", exitCode: 1 }));
           return;
         }
-        exec(command, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-          const exitCode = err ? (err as ExecException).code ?? 1 : 0;
-          recordCommandEvent(command, { exitCode });
+        void runHostCommand(command, hostCommandContext()).then((result) => {
+          recordCommandEvent(command, result);
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            stdout: stdout.toString(),
-            stderr: stderr.toString(),
-            exitCode,
-          }));
+          res.end(JSON.stringify(result));
         });
       });
       return;
@@ -2064,6 +2085,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const selectedDevice = queryDevice(rawUrl) ?? options?.device ?? null;
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     const devtoolsTarget = devtoolsProxyTarget(rawUrl, devtoolsPrefix);
+    // Simulator input and the DevTools bridge both require the session token.
+    if ((helperTarget || devtoolsTarget) && !hasQueryToken(rawUrl, execToken)) {
+      socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      return;
+    }
     if (devtoolsTarget) {
       (async () => {
         try {
@@ -2105,6 +2131,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       `${base}/ax`,
     ],
     onUiRequest: handleUiRequest,
+    runCommand: (command) => runHostCommand(command, hostCommandContext()),
     onCommandResult: (command, result) => recordCommandEvent(command, result),
   });
 
@@ -2112,8 +2139,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   // channel plus same-origin helper/devtools proxy sockets.
   const handleProxyUpgrade = middleware.handleUpgrade;
   middleware.handleUpgrade = (req: SimReq, socket: Socket, head: Buffer) => {
+    // One gate for every WebSocket: allowlisted Host, and an Origin that is
+    // either absent (non-browser client) or this server itself.
+    if (guard.checkUpgrade(req)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
     if (handleExecUpgrade(req, socket, head)) return;
     handleProxyUpgrade(req, socket, head);
   };
+  middleware.allowPort = (port: number) => guard.allowPort(port);
   return middleware;
 }

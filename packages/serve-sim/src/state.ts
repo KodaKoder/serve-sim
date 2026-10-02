@@ -1,6 +1,6 @@
 import { tmpdir } from "os";
 import { join } from "path";
-import { readdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from "fs";
 
 /** Directory where serve-sim stores runtime state. */
 export const STATE_DIR = join(tmpdir(), "serve-sim");
@@ -71,4 +71,64 @@ export function listStateFiles(): string[] {
   } catch {
     return [];
   }
+}
+
+/** Per-server session token file. Deliberately not `server-*.json`, so it is never enumerated as device state. */
+function sessionTokenFile(pid: number): string {
+  return join(STATE_DIR, `token-${pid}`);
+}
+
+/**
+ * Publish this process's session token for local CLI commands (`serve-sim
+ * tap`, `button`, …), which drive the input socket from another process. The
+ * file is readable only by the current user and removed on exit.
+ */
+export function writeSessionToken(token: string): void {
+  const file = sessionTokenFile(process.pid);
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    pruneStaleSessionTokens();
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, token, { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch {
+    return; // CLI input commands will be refused; the preview page is unaffected.
+  }
+  if (tokenCleanupRegistered) return;
+  tokenCleanupRegistered = true;
+  process.once("exit", () => {
+    try { unlinkSync(file); } catch {}
+  });
+}
+let tokenCleanupRegistered = false;
+
+/** Drop token files left behind by servers that were killed before their exit hook ran. */
+function pruneStaleSessionTokens(): void {
+  for (const name of readdirSync(STATE_DIR)) {
+    const pid = Number(/^token-(\d+)$/.exec(name)?.[1]);
+    if (!pid || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") {
+        try { unlinkSync(join(STATE_DIR, name)); } catch {}
+      }
+    }
+  }
+}
+
+/** Session token of the serve-sim server running as `pid`, if it published one. */
+export function readSessionToken(pid: number): string | null {
+  try {
+    return readFileSync(sessionTokenFile(pid), "utf-8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Append the owning server's session token to a helper WebSocket URL. */
+export function authenticatedWsUrl(state: Pick<ServeSimDeviceState, "pid" | "wsUrl">): string {
+  const token = readSessionToken(state.pid);
+  if (!token) return state.wsUrl;
+  return `${state.wsUrl}${state.wsUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 }

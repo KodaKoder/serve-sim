@@ -98,40 +98,16 @@ describe("previewConfigForState", () => {
 
 describe("rewriteStateForRequestHost", () => {
   const state = states[0]!;
-  // Proxy mode routes browsers through the preview's same-origin `/helper`
-  // proxy; the trailing args are (base, protocol, proxy).
+  // Helper URLs are always rewritten onto the preview's own origin; the
+  // trailing args are (base, protocol).
   const proxy = (host: string | undefined, base = "", protocol: "http" | "https" = "http") =>
-    rewriteStateForRequestHost(state, host, base, protocol, true);
+    rewriteStateForRequestHost(state, host, base, protocol);
 
   test("returns the state unchanged when host header is missing", () => {
     expect(rewriteStateForRequestHost(state, undefined)).toBe(state);
-    expect(proxy(undefined)).toBe(state);
   });
 
-  describe("default (direct helper URLs, no proxy)", () => {
-    test("leaves loopback viewers on the helper's own port", () => {
-      expect(rewriteStateForRequestHost(state, "localhost:3200")).toBe(state);
-      expect(rewriteStateForRequestHost(state, "127.0.0.1:3200")).toBe(state);
-      expect(rewriteStateForRequestHost(state, "[::1]:3200")).toBe(state);
-    });
-
-    test("swaps the loopback host for LAN/tunnel viewers, keeping the helper port", () => {
-      expect(rewriteStateForRequestHost(state, "192.168.1.42:3200")).toEqual({
-        ...state,
-        url: "http://192.168.1.42:3100",
-        streamUrl: "http://192.168.1.42:3100/stream.mjpeg",
-        wsUrl: "ws://192.168.1.42:3100/ws",
-      });
-      expect(rewriteStateForRequestHost(state, "tunnel.example.com")).toEqual({
-        ...state,
-        url: "http://tunnel.example.com:3100",
-        streamUrl: "http://tunnel.example.com:3100/stream.mjpeg",
-        wsUrl: "ws://tunnel.example.com:3100/ws",
-      });
-    });
-  });
-
-  describe("proxy mode (same-origin /helper)", () => {
+  describe("same-origin /helper URLs", () => {
     test("rewrites loopback viewers through the same-origin helper proxy", () => {
       expect(proxy("localhost:3200")).toEqual({
         ...state,

@@ -96,7 +96,7 @@ export async function sendKeyEventsToWs(
     };
 
     ws.onerror = () => {
-      reject(new Error(`WebSocket connection failed: ${wsUrl}`));
+      reject(new Error(`WebSocket connection failed: ${wsUrl.split("?")[0]}`));
     };
   });
 }
