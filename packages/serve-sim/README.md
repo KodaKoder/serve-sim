@@ -262,7 +262,7 @@ module.exports = config;
 
 ## Embed in your dev server
 
-`serve-sim/middleware` is a Connect-style middleware that mounts the same preview UI inside your existing dev server (Metro, Vite, Next, plain Express, etc.). Run `serve-sim --detach` once to start the streaming helper, then add the middleware:
+`serve-sim/middleware` is a Connect-style middleware that mounts the same preview UI inside your existing dev server (Metro, Vite, Next, plain Express, etc.). Add the middleware:
 
 ```ts
 import { simMiddleware } from "serve-sim/middleware";
@@ -272,14 +272,10 @@ app.use(simMiddleware({ basePath: "/.sim" }));
 // → state JSON  at /.sim/api
 ```
 
-The middleware reads the helper's state from `$TMPDIR/serve-sim/` and points the browser at the helper's stream, interaction WebSocket, and WebKit DevTools endpoints. By default those URLs target the helper's own port directly (CORS is wide-open on the helper), so a plain `app.use(...)` mount works without touching your server's WebSocket handling.
-
-### Single-port / remote proxying
-
-To expose the preview to remote viewers behind a single port (the way standalone `serve-sim` does), pass `proxyHelpers: true`. The browser then reaches the stream, control socket, and DevTools through same-origin `/.sim/helper/<device>` and `/.sim/devtools` URLs, so the per-device helper port and inspect-webkit bridge can stay local to the host. This routes WebSockets through the middleware, so you must forward your server's `upgrade` events to `handleUpgrade`:
+The page reaches the stream, the input socket and WebKit DevTools through the middleware's own same-origin `/.sim/helper/<device>` and `/.sim/devtools` routes. Video and the tools work with a plain `app.use(...)`; simulator input and DevTools use WebSockets, so forward your server's `upgrade` events to `handleUpgrade`:
 
 ```ts
-const middleware = simMiddleware({ basePath: "/.sim", proxyHelpers: true });
+const middleware = simMiddleware({ basePath: "/.sim" });
 app.use(middleware);
 
 const server = app.listen(3000);
@@ -288,7 +284,21 @@ server.on("upgrade", (req, socket, head) =>
 );
 ```
 
-If you enable `proxyHelpers` but don't wire `upgrade`, the page still loads video over HTTP but loses simulator input and DevTools (their sockets never reach the proxy). When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+When terminating TLS at a reverse proxy, forward `X-Forwarded-Proto` so the helper URLs use `https`/`wss` and avoid mixed-content blocks.
+
+## Security model
+
+serve-sim controls a simulator and runs commands on your Mac, so it treats every web page other than its own as hostile, even though it only listens on `127.0.0.1` by default:
+
+- **Host allowlist.** Requests and WebSocket upgrades must name `localhost`, `127.0.0.1` or `[::1]` on the bound port in their `Host` header; anything else gets `403`. This is what stops DNS-rebinding attacks. To reach the preview under another name (a tunnel, a reverse proxy), pass `--allowed-host <host>` (repeatable), or `allowedHosts` to the middleware. `--host 0.0.0.0` additionally accepts the machine's own addresses and hostname.
+- **Same-origin only.** WebSocket upgrades and state-changing requests must come from the preview's own origin (or from a non-browser client, which sends no `Origin`). No route sends CORS headers, so other sites cannot read the screen, the accessibility tree or the config.
+- **Session token.** Simulator input, device start/shutdown, DevTools and host commands require a per-process token that is delivered only inside the preview HTML — never by `/api`. The `serve-sim tap|gesture|button|…` commands read it from a file in `$TMPDIR/serve-sim/` that only your user can open.
+- **No shell.** The page can only run the specific commands its tools need (`simctl` actions for the selected simulator, the `serve-sim camera|permissions|rotate|button` subcommands, staging dropped files under `/tmp`). They are executed without a shell. `--unsafe-exec` (middleware: `unsafeExec: true`) restores arbitrary shell commands for setups that depend on it; leave it off otherwise.
+- **DevTools bridge.** The WebKit inspector bridge listens on `127.0.0.1` only, refuses browser origins, and is started only by an authenticated request.
+
+Binding to a non-loopback address (`--host 0.0.0.0`) hands all of this to anyone who can reach the port: they can load the page, and the token with it. Only do that on a network you trust.
+
+Embedding note: earlier versions pointed the page straight at a `serve-sim --detach` helper's port, relying on wide-open CORS and an unauthenticated input socket. That mode is gone; `proxyHelpers` is accepted but no longer has any effect.
 
 ## How it works
 
