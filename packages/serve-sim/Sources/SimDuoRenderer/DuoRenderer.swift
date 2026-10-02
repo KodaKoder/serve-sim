@@ -44,6 +44,8 @@ import UniformTypeIdentifiers
     private let fieldOfView: Float = 2 * atan(36 / (2 * 200.0)) * 180 / .pi
 
     init(modelURL: URL) async throws {
+        // Initialize the shared engine on the main actor before async asset loading.
+        renderer = try RealityRenderer()
         // Load the folding geometry, then apply Device Hub's neutral shell palette.
         let catalog = try await Entity.ConfigurationCatalog(from: modelURL)
         let loaded = try await Entity(from: catalog, configurations: ["color": "Dark"])
@@ -62,7 +64,6 @@ import UniformTypeIdentifiers
         hardwareProjection = try DuoHardwareProjection(entity: inner.0)
         coverProjection = try DuoScreenProjection(slot: cover, inner: false)
         innerProjection = try DuoScreenProjection(slot: inner, inner: true)
-        renderer = try RealityRenderer()
         subject.removeFromParent()
         rest.addChild(subject)
         wrapper.addChild(rest)
