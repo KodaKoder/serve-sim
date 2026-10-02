@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import WebSocket from "ws";
 import { Command, InvalidArgumentError } from "commander";
-import { execFileSync, execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { execFileSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { networkInterfaces } from "os";
@@ -100,7 +100,7 @@ function getBootedUdids(): Set<string> | null {
     return bootedSnapshot.booted;
   }
   try {
-    const output = execSync("xcrun simctl list devices booted -j", {
+    const output = execFileSync("xcrun", ["simctl", "list", "devices", "booted", "-j"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_000,
@@ -209,7 +209,7 @@ function clearState(udid?: string) {
  */
 function pickDefaultDevice(): { udid: string; name: string } | null {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", ["simctl", "list", "devices", "-j"], { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
     };
@@ -238,7 +238,7 @@ function getDeviceName(udid: string): string | null {
 function readDeviceNamesByUdid(): Map<string, string> {
   const names = new Map<string, string>();
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", ["simctl", "list", "devices", "-j"], { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; name: string; state: string }>>;
     };
@@ -253,7 +253,7 @@ function readDeviceNamesByUdid(): Map<string, string> {
 
 function isDeviceBooted(udid: string): boolean {
   try {
-    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const output = execFileSync("xcrun", ["simctl", "list", "devices", "-j"], { encoding: "utf-8" });
     const data = JSON.parse(output) as {
       devices: Record<string, Array<{ udid: string; state: string }>>;
     };
@@ -269,7 +269,7 @@ function isDeviceBooted(udid: string): boolean {
 function bootDevice(udid: string): void {
   if (!isDeviceBooted(udid)) {
     try {
-      execSync(`xcrun simctl boot ${udid}`, { encoding: "utf-8", stdio: "pipe" });
+      execFileSync("xcrun", ["simctl", "boot", udid], { encoding: "utf-8", stdio: "pipe" });
     } catch (err: any) {
       const msg = (err.stderr ?? err.message ?? "").toLowerCase();
       if (!msg.includes("booted") && !msg.includes("current state")) {
@@ -284,7 +284,7 @@ function bootDevice(udid: string): void {
   // for a window server that never arrives — in that environment the test
   // harness is expected to have already driven the sim via simctl.
   try {
-    execSync("open -ga Simulator", {
+    execFileSync("open", ["-ga", "Simulator"], {
       encoding: "utf-8",
       stdio: "pipe",
       timeout: 3_000,
@@ -1037,7 +1037,7 @@ function buildCameraDylib(): string {
     );
   }
   console.error("[serve-sim] building libSimCameraInjector.dylib (one-time)…");
-  execSync(`bash "${buildScript}"`, { stdio: "inherit" });
+  execFileSync("bash", [buildScript], { stdio: "inherit" });
   const out = locateCameraDylib();
   if (!out) throw new Error("Build succeeded but dylib not found.");
   return out;
@@ -1061,7 +1061,7 @@ function buildCameraHelper(): string {
     );
   }
   console.error("[serve-sim] building serve-sim-camera-helper (one-time)…");
-  execSync(`bash "${buildScript}"`, { stdio: "inherit" });
+  execFileSync("bash", [buildScript], { stdio: "inherit" });
   const out = locateCameraHelper();
   if (!out) throw new Error("Build succeeded but helper binary not found.");
   return out;
@@ -1353,7 +1353,7 @@ Examples:
 
   if (listWebcams) {
     const helper = locateCameraHelper() ?? buildCameraHelper();
-    execSync(`"${helper}" --list`, { stdio: "inherit" });
+    execFileSync(helper, ["--list"], { stdio: "inherit" });
     return;
   }
 
@@ -1364,7 +1364,7 @@ Examples:
     const terminated: string[] = [];
     for (const b of injectedBundles) {
       try {
-        execSync(`xcrun simctl terminate "${udid}" "${b}"`, { stdio: "ignore" });
+        execFileSync("xcrun", ["simctl", "terminate", udid, b], { stdio: "ignore" });
         terminated.push(b);
       } catch {}
     }
@@ -1532,12 +1532,12 @@ Examples:
   // we want to bring a new app into the set. Source-only hot-swaps go
   // through `camera switch`, not this path.
   try {
-    execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
+    execFileSync("xcrun", ["simctl", "privacy", udid, "grant", "camera", bundleId], {
       stdio: "ignore",
     });
   } catch {}
   try {
-    execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
+    execFileSync("xcrun", ["simctl", "terminate", udid, bundleId], { stdio: "ignore" });
   } catch {}
 
   const env = {
@@ -1549,7 +1549,7 @@ Examples:
 
   let stdoutBuf = "";
   try {
-    stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
+    stdoutBuf = execFileSync("xcrun", ["simctl", "launch", udid, bundleId], {
       env,
       encoding: "utf-8",
     });

@@ -1,5 +1,5 @@
 /** TCP port ownership helpers for helper lifecycle management. */
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { sleepSync } from "./runtime";
 
 /**
@@ -13,7 +13,7 @@ import { sleepSync } from "./runtime";
  */
 export function getPortHolders(port: number): number[] {
   try {
-    const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
+    const output = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf-8",
       stdio: "pipe",
     }).trim();
