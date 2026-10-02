@@ -25,6 +25,8 @@ declare global {
       serveSimBin?: string;
       /** Session token required by every state-changing route. Only present in the page HTML. */
       execToken?: string;
+      /** Set when the server can be shut down from the page (standalone serve-sim). */
+      canStopServer?: boolean;
       /**
        * Server-pinned stream codec. `"mjpeg"` forces the software JPEG path
        * (for hosts whose hardware can't encode H.264); `"auto"`/undefined lets

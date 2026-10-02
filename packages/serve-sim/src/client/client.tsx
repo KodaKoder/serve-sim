@@ -29,7 +29,7 @@ import {
   type StreamConfig,
 } from "./simulator";
 
-import { Globe, PanelRight, Upload } from "lucide-react";
+import { Globe, PanelRight, Power, Upload } from "lucide-react";
 import { ReloadIcon } from "./icons";
 import { AxDomOverlay } from "./components/ax-dom-overlay";
 import { AxStateProvider } from "./components/ax-state-provider";
@@ -277,12 +277,13 @@ function App() {
       if (next) {
         // Config pushed by the server never carries the session token; keep
         // the one this page was loaded with.
-        window.__SIM_PREVIEW__ = { ...next, execToken: window.__SIM_PREVIEW__?.execToken };
+        const { execToken, canStopServer } = window.__SIM_PREVIEW__ ?? {};
+        window.__SIM_PREVIEW__ = { ...next, execToken, canStopServer };
       } else if (window.__SIM_PREVIEW__) {
         // Keep the minimal injection: the empty state still routes through
         // simEndpoint (basePath) and authenticates /exec (execToken).
-        const { basePath, execToken } = window.__SIM_PREVIEW__;
-        window.__SIM_PREVIEW__ = { basePath, execToken } as Window["__SIM_PREVIEW__"];
+        const { basePath, execToken, canStopServer } = window.__SIM_PREVIEW__;
+        window.__SIM_PREVIEW__ = { basePath, execToken, canStopServer } as Window["__SIM_PREVIEW__"];
       }
       return next;
     });
@@ -817,6 +818,19 @@ function AppWithConfig({
   // Start with the tools panel open when the viewport has room for it beside
   // the simulator (typical device frame ≈ 420px plus page/panel gutters);
   // smaller windows keep it closed so the device isn't squeezed on load.
+  // Standalone serve-sim lets the page shut it down; embedded mounts don't.
+  const [canStopServer] = useState(() => window.__SIM_PREVIEW__?.canStopServer === true);
+  const stopServer = useCallback(() => {
+    if (!window.confirm("Stop the serve-sim server? The simulator keeps running.")) return;
+    void execOnHost("serve-sim:stop-server").then(
+      (result) => {
+        if (result.exitCode === 0) toast.success("serve-sim stopped. You can close this tab.");
+        else toast.error(result.stderr.trim() || "Could not stop the server.");
+      },
+      // The socket can drop before the reply lands — the server is gone either way.
+      () => toast.success("serve-sim stopped. You can close this tab."),
+    );
+  }, []);
   const [panelOpen, setPanelOpen] = useState(() => {
     if (initialState?.panes) return initialRightPane === "tools";
     if (typeof window === "undefined") return false;
@@ -1322,6 +1336,16 @@ function AppWithConfig({
         >
           <Globe size={18} strokeWidth={1.75} />
         </button>
+        {canStopServer && (
+          <button
+            onClick={stopServer}
+            className="w-[30px] h-[30px] flex items-center justify-center bg-transparent border-none rounded-md text-[#8e8e93] cursor-pointer [transition:background_0.15s_ease,color_0.15s_ease] hover:bg-white/8 hover:text-[#ff453a]"
+            aria-label="Stop serve-sim server"
+            title="Stop server"
+          >
+            <Power size={18} strokeWidth={1.75} />
+          </button>
+        )}
       </div>
 
       <ToolsPanel

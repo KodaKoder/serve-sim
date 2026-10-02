@@ -1234,6 +1234,12 @@ export interface SimMiddlewareOptions {
    */
   unsafeExec?: boolean;
   /**
+   * Called when the page's "Stop server" button is used. Provide it only when
+   * this middleware owns the process (the standalone CLI does); without it the
+   * button is hidden and the action refused.
+   */
+  onStopServer?: () => void;
+  /**
    * Pin the preview stream codec. `"mjpeg"` forces the software JPEG path for
    * hosts whose hardware can't encode H.264 (e.g. VMs without the high/low-
    * latency H.264 profiles); `"auto"`/undefined lets the browser pick H.264.
@@ -1291,8 +1297,12 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
   const hostCommandContext = () => ({
     serveSimBin: serveSimBinPath(),
     allowArbitrary: options?.unsafeExec === true,
+    stopServer: options?.onStopServer,
   });
-  const pageOnlyConfig = { execToken };
+  const pageOnlyConfig = {
+    execToken,
+    ...(options?.onStopServer ? { canStopServer: true } : {}),
+  };
   const deny = (res: SimRes, status: number, error: string) => {
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify({ ok: false, error }));

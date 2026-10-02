@@ -136,3 +136,16 @@ describe("serve-sim: host actions", () => {
     }
   });
 });
+
+describe("serve-sim:stop-server", () => {
+  test("is refused unless the server opted in, and stops it after replying when it did", async () => {
+    expect((await runHostCommand("serve-sim:stop-server", ctx)).exitCode).toBe(126);
+
+    let stopped = false;
+    const result = await runHostCommand("serve-sim:stop-server", { ...ctx, stopServer: () => { stopped = true; } });
+    expect(result.exitCode).toBe(0);
+    expect(stopped).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(stopped).toBe(true);
+  });
+});

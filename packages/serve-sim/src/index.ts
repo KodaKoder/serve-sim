@@ -1640,6 +1640,7 @@ async function serve(
     initialState,
     allowedHosts: [...(isLoopbackBind ? [] : hostsForBindAddress(host)), ...security.allowedHosts],
     unsafeExec: security.unsafeExec,
+    onStopServer: () => process.exit(0),
   });
 
   // Try requested port; if busy and the user didn't pin it, scan forward.

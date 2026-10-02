@@ -29,6 +29,8 @@ export interface HostCommandContext {
   serveSimBin: string;
   /** Run anything through a shell. Off unless the user opted in. */
   allowArbitrary?: boolean;
+  /** Shuts this server down. Only set by the standalone CLI, which owns its process. */
+  stopServer?: () => void;
 }
 
 const MAX_BUFFER = 16 * 1024 * 1024;
@@ -118,8 +120,14 @@ const ok = (stdout = ""): HostCommandResult => ({ stdout, stderr: "", exitCode: 
 const fail = (stderr: string): HostCommandResult => ({ stdout: "", stderr, exitCode: 1 });
 
 /** `serve-sim:*` actions: host work that used to be spelled as shell pipelines. */
-async function runBuiltin(name: string, args: string[]): Promise<HostCommandResult | null> {
+async function runBuiltin(name: string, args: string[], ctx: HostCommandContext): Promise<HostCommandResult | null> {
   switch (name) {
+    case "serve-sim:stop-server": {
+      if (args.length !== 0 || !ctx.stopServer) return null;
+      // Let the reply reach the page before the process goes away.
+      setTimeout(ctx.stopServer, 150);
+      return ok();
+    }
     case "serve-sim:write-tmp": {
       const [path, mode, data] = args;
       if (args.length !== 3 || !STAGED_FILE.test(path!) || (mode !== "create" && mode !== "append")) return null;
@@ -254,7 +262,7 @@ export async function runHostCommand(command: string, ctx: HostCommandContext): 
   const argv = splitHostCommand(command);
   if (argv && argv.length > 0) {
     if (argv[0]!.startsWith("serve-sim:")) {
-      const result = await runBuiltin(argv[0]!, argv.slice(1));
+      const result = await runBuiltin(argv[0]!, argv.slice(1), ctx);
       if (result) return result;
     } else {
       const allowed = resolveHostCommand(argv, ctx);
