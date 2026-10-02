@@ -23,7 +23,7 @@ declare global {
       // shells out via `node <bin> camera ...` so it doesn't depend on the
       // `serve-sim` binary being on the user's PATH.
       serveSimBin?: string;
-      /** Bearer token required by the /exec shell-exec route. */
+      /** Session token required by every state-changing route. Only present in the page HTML. */
       execToken?: string;
       /**
        * Server-pinned stream codec. `"mjpeg"` forces the software JPEG path

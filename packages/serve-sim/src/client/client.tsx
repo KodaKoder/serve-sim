@@ -83,6 +83,7 @@ import {
 } from "./utils/chrome-visibility";
 import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { selectInitialRightPane } from "../preview-initial-state";
+import { authHeaders, withSessionToken } from "./utils/session-token";
 import { simEndpoint, streamConfigFrom } from "./utils/sim-endpoint";
 import {
   bindSelectedConfigStream,
@@ -207,7 +208,7 @@ function App() {
       try {
         const res = await fetch(gridStartEndpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders(),
           body: JSON.stringify({ udid }),
         });
         const json = await res.json().catch(() => ({}));
@@ -236,7 +237,7 @@ function App() {
       try {
         const res = await fetch(gridShutdownEndpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders(),
           body: JSON.stringify({ udid }),
         });
         const json = await res.json().catch(() => ({}));
@@ -274,7 +275,9 @@ function App() {
       next = proxyPreviewConfigForBrowser(streamConfigFrom(next), window.location);
       if (previewConfigKey(prev) === previewConfigKey(next)) return prev;
       if (next) {
-        window.__SIM_PREVIEW__ = next;
+        // Config pushed by the server never carries the session token; keep
+        // the one this page was loaded with.
+        window.__SIM_PREVIEW__ = { ...next, execToken: window.__SIM_PREVIEW__?.execToken };
       } else if (window.__SIM_PREVIEW__) {
         // Keep the minimal injection: the empty state still routes through
         // simEndpoint (basePath) and authenticates /exec (execToken).
@@ -644,7 +647,7 @@ function AppWithConfig({
     };
 
     const connect = () => {
-      const ws = new WebSocket(config.wsUrl);
+      const ws = new WebSocket(withSessionToken(config.wsUrl));
       ws.binaryType = "arraybuffer";
       currentWs = ws;
       wsRef.current = ws;

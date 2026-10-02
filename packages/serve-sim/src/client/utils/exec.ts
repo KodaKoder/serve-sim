@@ -1,3 +1,4 @@
+import { sessionToken } from "./session-token";
 import { simEndpoint } from "./sim-endpoint";
 
 export interface ExecResult {
@@ -6,7 +7,7 @@ export interface ExecResult {
   exitCode: number;
 }
 
-// Everything the preview page asks of the host — shell execs, simulator
+// Everything the preview page asks of the host — host commands, simulator
 // settings, and the SSE side-channels — rides one WebSocket (`/exec-ws`).
 // Pooled fetches are not used: every tab holds long-lived HTTP streams
 // (MJPEG), and the browser's six-connections-per-origin cap let pooled
@@ -76,7 +77,7 @@ function openExecSocket(): Promise<WebSocket> {
       }
     }, CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
-      ws.send(JSON.stringify({ token: window.__SIM_PREVIEW__?.execToken ?? "" }));
+      ws.send(JSON.stringify({ token: sessionToken() }));
     };
     ws.onmessage = (event) => {
       let msg: SocketReply;

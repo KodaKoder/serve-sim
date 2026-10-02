@@ -55,9 +55,7 @@ export async function fetchAppDetails(
       `${iconName}60x60@2x.png`,
     ];
     const find = await exec(
-      `bash -c ${shellEscape(
-        candidates.map((c) => `[ -f ${shellEscape(appPath + "/" + c)} ] && echo ${shellEscape(appPath + "/" + c)} && exit 0`).join("; ") + "; exit 1",
-      )}`,
+      `serve-sim:first-file ${candidates.map((c) => shellEscape(appPath + "/" + c)).join(" ")}`,
     );
     const iconPath = find.stdout.trim();
     if (iconPath) {

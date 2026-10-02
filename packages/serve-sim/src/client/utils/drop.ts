@@ -5,8 +5,8 @@ import { shellEscape, type ExecResult } from "./exec";
 // Media → `xcrun simctl addmedia`   (Photos)
 // .ipa  → `xcrun simctl install`    (install app on simulator)
 //
-// Files are streamed to /tmp over /exec in base64-chunked bash `echo | base64 -d`
-// calls. No sonner dep here, so uploads surface in an inline toast list.
+// Files are streamed to /tmp in base64 chunks through the host's
+// `serve-sim:write-tmp` action. No sonner dep here, so uploads surface in an inline toast list.
 
 export const DROP_MEDIA_MIME_TYPES = new Set([
   "image/jpeg",
@@ -19,10 +19,9 @@ export const DROP_MEDIA_MIME_TYPES = new Set([
   "video/quicktime",
 ]);
 
-// 192KB of raw bytes per chunk → ~256KB of base64 per exec. macOS ARG_MAX is
-// 1MB, so this leaves generous headroom for the bash/echo wrapper while
-// sharply cutting round-trips on large .ipa uploads. Each chunk is decoded by
-// its own `base64 -d`, so chunks are independent of each other.
+// 192KB of raw bytes per chunk → ~256KB of base64 per request, well under the
+// control socket's message cap while sharply cutting round-trips on large
+// .ipa uploads. Each chunk is decoded on its own, so chunks are independent.
 export const DROP_CHUNK_BYTES = 196608;
 export const DROP_MAX_FILE_SIZE = 500 * 1024 * 1024;
 
@@ -85,8 +84,8 @@ async function streamFileToHostPath(
   for (let offset = 0; offset < file.size; offset += DROP_CHUNK_BYTES) {
     const slice = await file.slice(offset, offset + DROP_CHUNK_BYTES).arrayBuffer();
     const chunk = arrayBufferToBase64(slice);
-    const op = offset === 0 ? ">" : ">>";
-    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+    const mode = offset === 0 ? "create" : "append";
+    const result = await exec(`serve-sim:write-tmp ${tmpPath} ${mode} ${chunk}`);
     if (result.exitCode !== 0) {
       throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
     }
@@ -100,7 +99,7 @@ async function streamFileToHostPath(
   }
 }
 
-// Stream a file to /tmp via the /exec base64 chunk loop. Used by the camera
+// Stream a file to /tmp via the base64 chunk loop. Used by the camera
 // panel to stage image/video sources for `serve-sim camera --file`.
 // Caller is responsible for the lifetime of the temp file.
 export async function uploadFileToTmp(
@@ -147,6 +146,6 @@ export async function uploadDroppedFile(
       throw new Error(result.stderr || `${label} failed (exit ${result.exitCode})`);
     }
   } finally {
-    exec(`bash -c 'rm -f ${tmpPath}'`).catch(() => {});
+    exec(`serve-sim:rm-tmp ${tmpPath}`).catch(() => {});
   }
 }

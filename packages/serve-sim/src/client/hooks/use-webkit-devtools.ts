@@ -4,6 +4,7 @@ import {
   type WebKitDevtoolsResponse,
   type WebKitDevtoolsTarget,
 } from "../utils/devtools";
+import { authHeaders } from "../utils/session-token";
 
 export function useWebKitDevtools(endpoint: string | undefined, enabled: boolean) {
   const [targets, setTargets] = useState<WebKitDevtoolsTarget[]>([]);
@@ -15,7 +16,7 @@ export function useWebKitDevtools(endpoint: string | undefined, enabled: boolean
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(endpoint, { cache: "no-store" });
+      const res = await fetch(endpoint, { cache: "no-store", headers: authHeaders() });
       const json = (await res.json()) as WebKitDevtoolsResponse;
       if (!res.ok || json.error) throw new Error(json.error || "Failed to list WebKit targets");
       const location = typeof window === "undefined" ? null : window.location;

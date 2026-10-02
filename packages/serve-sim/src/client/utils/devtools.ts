@@ -1,3 +1,4 @@
+import { authHeaders } from "./session-token";
 import { simEndpoint } from "./sim-endpoint";
 
 export interface WebKitDevtoolsTarget {
@@ -57,7 +58,7 @@ export function proxyWebKitDevtoolsTargetForBrowser(
 export function postHighlightTarget(targetId: string, on: boolean) {
   void fetch(simEndpoint("devtools/highlight"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(),
     body: JSON.stringify({ targetId, on }),
     keepalive: true,
   }).catch(() => {});
@@ -65,18 +66,13 @@ export function postHighlightTarget(targetId: string, on: boolean) {
 
 // Tell the bridge to drop any cached hover sessions for this picker. Called
 // on close / unmount / pagehide so we don't camp on a WIR slot the user no
-// longer cares about. `sendBeacon` survives pagehide where `fetch` may not.
+// longer cares about. A `keepalive` fetch survives pagehide and, unlike
+// `sendBeacon`, can carry the session token.
 export function postReleaseHighlights() {
   const url = simEndpoint("devtools/release");
-  try {
-    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
-      const blob = new Blob(["{}"], { type: "application/json" });
-      if (navigator.sendBeacon(url, blob)) return;
-    }
-  } catch {}
   void fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(),
     body: "{}",
     keepalive: true,
   }).catch(() => {});

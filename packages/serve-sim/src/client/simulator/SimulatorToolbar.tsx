@@ -464,7 +464,7 @@ const ScreenshotButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(funct
         if (e.defaultPrevented) return;
         if (ctx.deviceUdid) {
           void ctx.exec(
-            `xcrun simctl io ${ctx.deviceUdid} screenshot ~/Desktop/serve-sim-screenshot-$(date +%s).png`,
+            `serve-sim:screenshot ${ctx.deviceUdid} ${Date.now()}`,
           );
         }
       }}

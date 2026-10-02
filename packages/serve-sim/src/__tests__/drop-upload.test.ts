@@ -18,12 +18,12 @@ function recordingExec(commands: string[]) {
 
 // Pull the base64 payload back out of a chunk-write command and decode it.
 function decodeChunkCommand(command: string): { bytes: Uint8Array; op: string } {
-  const match = command.match(/^bash -c 'echo ([A-Za-z0-9+/=]+) \| base64 -d (>>?) /);
+  const match = command.match(/^serve-sim:write-tmp \S+ (create|append) ([A-Za-z0-9+/=]+)$/);
   if (!match) throw new Error(`not a chunk write: ${command}`);
-  const bin = atob(match[1]!);
+  const bin = atob(match[2]!);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return { bytes, op: match[2]! };
+  return { bytes, op: match[1]! };
 }
 
 function patternBytes(size: number): Uint8Array<ArrayBuffer> {
@@ -52,7 +52,7 @@ describe("arrayBufferToBase64", () => {
 
 describe("uploadDroppedFile", () => {
   test("chunked writes reconstruct the original file, then addmedia + cleanup", async () => {
-    // 2.5 chunks so the loop exercises both the > create and >> append paths.
+    // 2.5 chunks so the loop exercises both the create and append paths.
     const original = patternBytes(Math.floor(DROP_CHUNK_BYTES * 2.5));
     const file = new File([original], "shot.png", { type: "image/png" });
     const commands: string[] = [];
@@ -62,10 +62,10 @@ describe("uploadDroppedFile", () => {
       progress.push(p),
     );
 
-    const chunkCommands = commands.filter((c) => c.includes("base64 -d"));
+    const chunkCommands = commands.filter((c) => c.startsWith("serve-sim:write-tmp "));
     expect(chunkCommands.length).toBe(3);
-    expect(decodeChunkCommand(chunkCommands[0]!).op).toBe(">");
-    expect(decodeChunkCommand(chunkCommands[1]!).op).toBe(">>");
+    expect(decodeChunkCommand(chunkCommands[0]!).op).toBe("create");
+    expect(decodeChunkCommand(chunkCommands[1]!).op).toBe("append");
 
     const reassembled = new Uint8Array(original.length);
     let offset = 0;
@@ -81,7 +81,7 @@ describe("uploadDroppedFile", () => {
     expect(reassembled).toEqual(original);
 
     expect(commands.some((c) => c.startsWith("xcrun simctl addmedia UDID "))).toBe(true);
-    expect(commands.some((c) => c.includes("rm -f "))).toBe(true);
+    expect(commands.some((c) => c.startsWith("serve-sim:rm-tmp "))).toBe(true);
 
     // Progress climbs monotonically, then flips to indeterminate for addmedia.
     expect(progress[0]).toBe(0);
@@ -105,7 +105,7 @@ describe("uploadDroppedFile", () => {
     const commands: string[] = [];
     const exec = async (command: string): Promise<ExecResult> => {
       commands.push(command);
-      if (command.includes("base64 -d")) {
+      if (command.startsWith("serve-sim:write-tmp ")) {
         return { stdout: "", stderr: "disk full", exitCode: 1 };
       }
       return OK;
@@ -114,7 +114,7 @@ describe("uploadDroppedFile", () => {
     await expect(
       uploadDroppedFile(file, "media", exec, "UDID", () => {}),
     ).rejects.toThrow("disk full");
-    expect(commands.some((c) => c.includes("rm -f "))).toBe(true);
+    expect(commands.some((c) => c.startsWith("serve-sim:rm-tmp "))).toBe(true);
   });
 });
 
@@ -126,7 +126,7 @@ describe("uploadFileToTmp", () => {
     const tmpPath = await uploadFileToTmp(file, "serve-sim-camsrc", "jpg", recordingExec(commands));
     expect(tmpPath).toMatch(/^\/tmp\/serve-sim-camsrc-.*\.jpg$/);
 
-    const chunkCommands = commands.filter((c) => c.includes("base64 -d"));
+    const chunkCommands = commands.filter((c) => c.startsWith("serve-sim:write-tmp "));
     expect(chunkCommands.length).toBe(2);
     const total = chunkCommands.reduce(
       (sum, c) => sum + decodeChunkCommand(c).bytes.length,

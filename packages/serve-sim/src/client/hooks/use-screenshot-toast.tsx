@@ -107,12 +107,10 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
     const id = crypto.randomUUID();
     render({ id, status: "saving", phase: "in" });
 
-    // Resolve $HOME shell-side so the saved path comes back absolute — a "~"
-    // path would survive shellEscape() as a literal tilde and break the later
-    // `open -R`. The command echoes the path it wrote on success.
-    const file = `$HOME/Desktop/serve-sim-screenshot-${timestampSlug()}.png`;
+    // The host saves to ~/Desktop/serve-sim-screenshot-<slug>.png and replies
+    // with the absolute path it wrote, which the later `open -R` needs.
     const capCmd =
-      `F="${file}"; xcrun simctl io ${shellEscape(deviceUdid)} screenshot${display ? ` --display=${display}` : ""} "$F" && printf '%s' "$F"`;
+      `serve-sim:screenshot ${shellEscape(deviceUdid)} ${timestampSlug()}${display ? ` ${display}` : ""}`;
 
     let path: string;
     try {
@@ -134,13 +132,10 @@ export function useScreenshotToast(deviceUdid?: string | null, display?: "primar
 
     render({ id, status: "saved", phase: "in", path }, SAVED_DISMISS_MS);
 
-    // Best-effort thumbnail: downscale to a temp PNG, base64 it back, then
-    // delete it. Failures (sips missing, etc.) just leave the placeholder.
-    const thumb = `/tmp/serve-sim-screenshot-thumb-${id}.png`;
+    // Best-effort thumbnail: the host downscales the capture and replies with
+    // base64 PNG. Failures (sips missing, etc.) just leave the placeholder.
     try {
-      const tr = await execOnHost(
-        `sips -Z 320 ${shellEscape(path)} --out ${shellEscape(thumb)} >/dev/null 2>&1 && base64 -i ${shellEscape(thumb)}; rm -f ${shellEscape(thumb)}`,
-      );
+      const tr = await execOnHost(`serve-sim:thumbnail ${shellEscape(path)}`);
       const b64 = tr.stdout.replace(/\s+/g, "");
       if (b64) {
         const current = toastRef.current;
